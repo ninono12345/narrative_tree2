@@ -1,0 +1,324 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Semantic Tree Explorer (Custom)</title>
+    <!-- jQuery -->
+    <script src="https://code.jquery.com/jquery-3.7.1.min.js"></script>
+    <!-- Split.js for resizable panes -->
+    <script src="https://unpkg.com/split.js/dist/split.min.js"></script>
+    <style>
+        :root {
+            --border-color: #dee2e6; --bg-light: #f8f9fa; --bg-details: #f1f3f5;
+            --primary-color: #007bff; --primary-hover: #0056b3; --text-color: #212529;
+            --text-muted: #6c757d; --tree-select: #e7f4ff;
+        }
+        html, body { height: 100%; margin: 0; padding: 0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif; overflow: hidden; color: var(--text-color); }
+        .split-container { display: flex; flex-direction: row; height: 100vh; }
+        .split { box-sizing: border-box; overflow-y: auto; }
+        .gutter { background-color: #eee; cursor: col-resize; }
+        #sidebar-column { background-color: var(--bg-light); display: flex; flex-direction: column; padding: 0; }
+        #search-panel { padding: 15px; border-bottom: 1px solid var(--border-color); display: flex; }
+        #search-input { flex-grow: 1; padding: 10px; border: 1px solid var(--border-color); border-radius: 4px 0 0 4px; border-right: none; font-size: 1rem; }
+        #search-button { padding: 10px 15px; border: 1px solid var(--primary-color); background-color: var(--primary-color); color: white; cursor: pointer; border-radius: 0 4px 4px 0; font-size: 1rem; }
+        #search-button:hover { background-color: var(--primary-hover); }
+        #search-button:disabled { background-color: #6c757d; border-color: #6c757d; cursor: not-allowed;}
+        #search-results { flex-grow: 1; overflow-y: auto; }
+        #search-results ul { list-style-type: none; padding: 10px; margin: 0; }
+        #search-results li { padding: 10px 12px; cursor: pointer; border-radius: 4px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; display: flex; justify-content: space-between; align-items: center; }
+        #search-results li:hover { background-color: #e9ecef; }
+        #search-results li.active { background-color: var(--primary-color); color: white; }
+        #search-results .score { font-size: 0.9em; color: white; background-color: var(--primary-color); padding: 2px 6px; border-radius: 4px; margin-left: 10px; }
+        #search-results li.active .score { background-color: white; color: var(--primary-color); }
+        .status-message { padding: 20px; text-align: center; color: var(--text-muted); }
+        #tree-column { padding: 20px; border-left: 1px solid var(--border-color); border-right: 1px solid var(--border-color); }
+        #details-column { background-color: var(--bg-details); padding: 20px; }
+        #details-column h3 { margin-top: 0; color: #343a40; border-bottom: 1px solid #ccc; padding-bottom: 10px; }
+
+        /* --- Custom Tree Styles --- */
+        #tree { user-select: none; }
+        #tree ul { list-style-type: none; margin: 0; padding-left: 25px; }
+        #tree li { padding: 2px 0; }
+        #tree .node-content { display: flex; align-items: center; padding: 4px; border-radius: 4px; }
+        #tree .node-content:hover { background-color: #f0f0f0; }
+        #tree .node-content.selected { background-color: var(--tree-select); }
+        #tree .toggle { font-family: monospace; width: 20px; text-align: center; cursor: pointer; color: #333; }
+        #tree .toggle.empty { cursor: default; visibility: hidden; }
+        #tree .node-text { cursor: pointer; flex-grow: 1; }
+        #tree li > ul { display: none; }
+        #tree li.expanded > ul { display: block; }
+        .loading-spinner { display: inline-block; width: 1em; height: 1em; vertical-align: middle; border: 2px solid #ccc; border-top-color: #333; border-radius: 50%; animation: spin 1s linear infinite; }
+        @keyframes spin { to { transform: rotate(360deg); } }
+        
+        /* --- New Styles for Details Panel --- */
+        #details-content .main-detail-text {
+            font-size: 1.1em;
+            line-height: 1.5;
+            margin: 0 0 20px 0;
+            padding-bottom: 15px;
+            border-bottom: 1px solid var(--border-color);
+            color: var(--text-color);
+        }
+        #details-content .properties-table {
+            width: 100%;
+            border-collapse: collapse;
+            font-size: 0.9em;
+        }
+        #details-content .properties-table td {
+            padding: 8px 5px;
+            border-bottom: 1px solid #e0e0e0;
+            vertical-align: top;
+        }
+        #details-content .properties-table tr:last-child td {
+            border-bottom: none;
+        }
+        #details-content .property-key {
+            font-weight: bold;
+            color: #495057;
+            width: 40%;
+            white-space: nowrap;
+        }
+        #details-content .property-value {
+            color: var(--text-color);
+            word-break: break-word;
+        }
+    </style>
+</head>
+<body>
+    <div class="split-container">
+        <div id="sidebar-column" class="split"><div id="search-panel"><input type="text" id="search-input" placeholder="Search semantic tree..."><button id="search-button">Search</button></div><div id="search-results"><p class="status-message">Enter a query to find nodes.</p></div></div>
+        <div id="tree-column" class="split"><div id="tree"></div></div>
+        <div id="details-column" class="split"><h3>Node Details</h3><div id="details-content"><p class="status-message">Click a node in the tree to see its properties.</p></div></div>
+    </div>
+
+<script>
+$(function () {
+    // --- 1. Initialize Resizable Panes ---
+    Split(['#sidebar-column', '#tree-column', '#details-column'], {
+        sizes: [25, 45, 30], minSize: 200, gutterSize: 8, cursor: 'col-resize'
+    });
+
+    const $tree = $('#tree');
+    const $detailsContent = $('#details-content');
+
+    // --- 2. Custom Tree Implementation ---
+
+    /**
+     * Helper function to format snake_case keys into 'Title Case' strings.
+     * @param {string} key - The key to format (e.g., "uploaded_at_avg").
+     * @returns {string} The formatted key (e.g., "Uploaded At Avg").
+     */
+    function formatDetailKey(key) {
+        return key
+            .replace(/_/g, ' ')
+            .replace(/\b\w/g, char => char.toUpperCase());
+    }
+
+    function createTreeNode(node) {
+        const toggleIcon = node.has_children ? '►' : ' ';
+        const toggleClass = node.has_children ? '' : 'empty';
+        const $li = $(`
+            <li data-node-id="${node.id}" data-has-children="${node.has_children}" data-loaded="false">
+                <div class="node-content">
+                    <span class="toggle ${toggleClass}">${toggleIcon}</span>
+                    <span class="node-text">${node.text}</span>
+                </div>
+            </li>
+        `);
+        $li.data('details', node.data);
+        return $li;
+    }
+
+    function loadChildren($parentLi) {
+        const nodeId = $parentLi.data('node-id');
+        const $toggle = $parentLi.find('.toggle').first();
+        const $spinner = $('<span class="loading-spinner"></span>');
+        $toggle.html($spinner);
+
+        return $.get(`/api/nodes/${encodeURIComponent(nodeId)}`)
+            .done(function (children) {
+                if (children && children.length > 0) {
+                    const $ul = $('<ul></ul>');
+                    children.forEach(childNode => { $ul.append(createTreeNode(childNode)); });
+                    $parentLi.append($ul);
+                }
+                $parentLi.data('loaded', true);
+            })
+            .fail(function () {
+                alert('Failed to load children for node: ' + nodeId);
+                $parentLi.find('.node-content').css('color', 'red');
+            })
+            .always(function () {
+                $toggle.html($parentLi.hasClass('expanded') ? '▼' : '►');
+            });
+    }
+
+    $tree.on('click', '.toggle', function (e) {
+        e.stopPropagation();
+        const $toggle = $(this);
+        const $li = $toggle.closest('li');
+        if ($toggle.hasClass('empty')) return;
+        const isExpanded = $li.hasClass('expanded');
+        $li.toggleClass('expanded', !isExpanded);
+        $toggle.text(isExpanded ? '►' : '▼');
+        const isLoaded = $li.data('loaded');
+        if (!isExpanded && !isLoaded) { loadChildren($li); }
+    });
+
+    /**
+     * Selects a node, highlights it, and displays its details in a formatted way.
+     * @param {jQuery} $li - The <li> element of the node to select.
+     */
+    function selectNode($li) {
+        if (!$li || $li.length === 0) return;
+        $tree.find('.node-content.selected').removeClass('selected');
+        const $content = $li.find('.node-content').first();
+        $content.addClass('selected');
+
+        const details = $li.data('details');
+        $detailsContent.empty(); // Clear previous content
+
+        if (details && Object.keys(details).length > 0) {
+            // 1. Display the main text summary prominently
+            if (details.text) {
+                 $detailsContent.append(`<p class="main-detail-text">${details.text}</p>`);
+            }
+
+            // 2. Create a table for the other properties
+            const $propertiesTable = $('<table class="properties-table"></table>');
+            let propertiesExist = false;
+
+            // 3. Iterate over properties, format them, and add to the table
+            for (const key in details) {
+                if (key === 'text' || key === 'id') continue; // Skip keys we already handled or don't need
+                
+                propertiesExist = true;
+                const formattedKey = formatDetailKey(key);
+                let value = details[key];
+
+                // Nicely format date-time strings
+                if (key.includes('uploaded_at') && value) {
+                    try {
+                        value = new Date(value).toLocaleString('en-US', { dateStyle: 'medium', timeStyle: 'short'});
+                    } catch(e) { /* ignore invalid dates */ }
+                }
+
+                const $row = $(`
+                    <tr>
+                        <td class="property-key">${formattedKey}</td>
+                        <td class="property-value">${value}</td>
+                    </tr>
+                `);
+                $propertiesTable.append($row);
+            }
+
+            if (propertiesExist) {
+                $detailsContent.append($propertiesTable);
+            }
+
+        } else {
+            $detailsContent.html('<p class="status-message">No additional data for this node.</p>');
+        }
+        
+        $li[0].scrollIntoView({ behavior: 'smooth', block: 'center' });
+    }
+
+    $tree.on('click', '.node-text', function (e) {
+        e.stopPropagation();
+        selectNode($(this).closest('li'));
+    });
+    
+    function initTree() {
+        $tree.empty();
+        $.get('/api/nodes/', function(rootNodes) {
+            const $rootUl = $('<ul></ul>');
+            rootNodes.forEach(node => { $rootUl.append(createTreeNode(node)); });
+            $tree.append($rootUl);
+        });
+    }
+    initTree();
+
+    // --- 3. Handle Search (Unchanged) ---
+    function performSearch() {
+        const query = $('#search-input').val().trim();
+        if (query.length < 3) { $('#search-results').html('<p class="status-message">Enter at least 3 characters.</p>'); return; }
+        $('#search-button').prop('disabled', true).text('Searching...');
+        $('#search-results').html('<p class="status-message">Searching...</p>');
+        $.ajax({
+            url: '/api/search', type: 'POST', contentType: 'application/json', data: JSON.stringify({ 'query': query }),
+            success: function (results) {
+                const resultsList = $('<ul></ul>');
+                if (results && results.length > 0) {
+                    results.forEach(item => {
+                        const listItem = $(`<li data-node-id="${item.id}"><span>${item.text}</span><span class="score">${item.score}</span></li>`);
+                        resultsList.append(listItem);
+                    });
+                } else if (results.error) { $('#search-results').html(`<p class="status-message" style="color:red;">Error: ${results.error}</p>`); return; }
+                else { resultsList.append('<li class="status-message">No results found.</li>'); }
+                $('#search-results').html(resultsList);
+            },
+            error: function(jqXHR) {
+                let errorMsg = 'Search failed.';
+                if (jqXHR.responseJSON && jqXHR.responseJSON.error) { errorMsg = `Error: ${jqXHR.responseJSON.error}`; }
+                $('#search-results').html(`<p class="status-message" style="color:red;">${errorMsg}</p>`);
+            },
+            complete: function() { $('#search-button').prop('disabled', false).text('Search'); }
+        });
+    }
+    $('#search-button').on('click', performSearch);
+    $('#search-input').on('keypress', e => { if (e.which === 13) performSearch(); });
+
+
+    // --- 4. Handle Clicks on Search Results (Unchanged) ---
+    $('#search-results').on('click', 'li[data-node-id]', async function () {
+        const $clickedItem = $(this);
+        const nodeId = $clickedItem.data('node-id');
+        if (!nodeId) return;
+
+        $('#search-results li').removeClass('active');
+        $clickedItem.addClass('active');
+
+        try {
+            const path = await $.get(`/api/path_to_node/${encodeURIComponent(nodeId)}`);
+            if (!path || path.length < 1) {
+                alert("Could not find a valid path for this node.");
+                return;
+            }
+            if (path[0] === 'outter') { path.shift(); }
+            await openPathInTree(path);
+        } catch (error) {
+            console.error("Error opening path in tree:", error);
+            alert('Error: API call to get node path failed.');
+        }
+    });
+
+    async function openPathInTree(path) {
+        let parentElement = $tree;
+        for (const nodeId of path) {
+            let $nodeLi = parentElement.find(`> ul > li[data-node-id="${nodeId}"]`);
+            if ($nodeLi.length === 0) {
+                console.error(`Path node ${nodeId} not found under its parent.`);
+                alert(`Error: Could not find node ${nodeId} in the tree.`);
+                return;
+            }
+            const isFinalNode = path[path.length - 1] === nodeId;
+            if (isFinalNode) {
+                selectNode($nodeLi);
+                break;
+            }
+            const hasChildren = $nodeLi.data('has-children');
+            const isExpanded = $nodeLi.hasClass('expanded');
+            if (hasChildren && !isExpanded) {
+                const isLoaded = $nodeLi.data('loaded');
+                if (!isLoaded) { await loadChildren($nodeLi); }
+                $nodeLi.addClass('expanded');
+                $nodeLi.find('.toggle').first().text('▼');
+            }
+            parentElement = $nodeLi;
+        }
+    }
+});
+</script>
+</body>
+</html>
