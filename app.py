@@ -10,7 +10,7 @@ import queue
 from concurrent.futures import Future
 
 # --- Environment and Vertex AI Initialization ---
-CREDENTIALS_FILE = ""
+CREDENTIALS_FILE = "commanding-fact-441820-j9-0e1712201ab6.json"
 if not os.path.exists(CREDENTIALS_FILE):
     print(f"FATAL ERROR: Credentials file '{CREDENTIALS_FILE}' not found.")
     exit()
