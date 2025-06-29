@@ -9,29 +9,29 @@ import threading
 import queue
 from concurrent.futures import Future
 
-# --- Environment and Vertex AI Initialization ---
-CREDENTIALS_FILE = "commanding-fact-441820-j9-0e1712201ab6.json"
-if not os.path.exists(CREDENTIALS_FILE):
-    print(f"FATAL ERROR: Credentials file '{CREDENTIALS_FILE}' not found.")
-    exit()
+# # --- Environment and Vertex AI Initialization ---
+# CREDENTIALS_FILE = "commanding-fact-441820-j9-0e1712201ab6.json"
+# if not os.path.exists(CREDENTIALS_FILE):
+#     print(f"FATAL ERROR: Credentials file '{CREDENTIALS_FILE}' not found.")
+#     exit()
 
-os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = CREDENTIALS_FILE
-print(f"Using credentials from: {os.environ.get('GOOGLE_APPLICATION_CREDENTIALS')}")
+# os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = CREDENTIALS_FILE
+# print(f"Using credentials from: {os.environ.get('GOOGLE_APPLICATION_CREDENTIALS')}")
 
-PROJECT_ID = "commanding-fact-441820-j9"
-MODEL_ID = "text-multilingual-embedding-002"
+# PROJECT_ID = "commanding-fact-441820-j9"
+# MODEL_ID = "text-multilingual-embedding-002"
 
-try:
-    import vertexai
-    from vertexai.language_models import TextEmbeddingModel, TextEmbeddingInput
-    vertexai.init(project=PROJECT_ID)
-    model_vertex = TextEmbeddingModel.from_pretrained(MODEL_ID)
-    print("✅ Vertex AI initialized successfully.")
-except Exception as e:
-    print(f"❌ FATAL ERROR: Could not initialize Vertex AI. Error: {e}")
-    exit()
+# try:
+#     import vertexai
+#     from vertexai.language_models import TextEmbeddingModel, TextEmbeddingInput
+#     vertexai.init(project=PROJECT_ID)
+#     model_vertex = TextEmbeddingModel.from_pretrained(MODEL_ID)
+#     print("✅ Vertex AI initialized successfully.")
+# except Exception as e:
+#     print(f"❌ FATAL ERROR: Could not initialize Vertex AI. Error: {e}")
+#     exit()
 
-# --- Thread-Safe Async Embedding Setup ---
+# # --- Thread-Safe Async Embedding Setup ---
 embedding_queue = queue.Queue()
 
 def embedding_worker():
