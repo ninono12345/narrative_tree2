@@ -9,29 +9,46 @@ import threading
 import queue
 from concurrent.futures import Future
 
-# # --- Environment and Vertex AI Initialization ---
+# --- NEW: Import for Vertex AI Vector Search ---
+from google.cloud import aiplatform_v1
+
+# --- Environment and Vertex AI Initialization ---
 # CREDENTIALS_FILE = "commanding-fact-441820-j9-0e1712201ab6.json"
 # if not os.path.exists(CREDENTIALS_FILE):
 #     print(f"FATAL ERROR: Credentials file '{CREDENTIALS_FILE}' not found.")
-#     exit()
+#     # exit()
 
 # os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = CREDENTIALS_FILE
 # print(f"Using credentials from: {os.environ.get('GOOGLE_APPLICATION_CREDENTIALS')}")
 
-# PROJECT_ID = "commanding-fact-441820-j9"
-# MODEL_ID = "text-multilingual-embedding-002"
+PROJECT_ID = "commanding-fact-441820-j9"
+MODEL_ID = "text-multilingual-embedding-002"
 
-# try:
-#     import vertexai
-#     from vertexai.language_models import TextEmbeddingModel, TextEmbeddingInput
-#     vertexai.init(project=PROJECT_ID)
-#     model_vertex = TextEmbeddingModel.from_pretrained(MODEL_ID)
-#     print("✅ Vertex AI initialized successfully.")
-# except Exception as e:
-#     print(f"❌ FATAL ERROR: Could not initialize Vertex AI. Error: {e}")
-#     exit()
+try:
+    import vertexai
+    from vertexai.language_models import TextEmbeddingModel, TextEmbeddingInput
+    vertexai.init(project=PROJECT_ID)
+    model_vertex = TextEmbeddingModel.from_pretrained(MODEL_ID)
+    print("✅ Vertex AI Embedding Model initialized successfully.")
+except Exception as e:
+    print(f"❌ FATAL ERROR: Could not initialize Vertex AI Embedding Model. Error: {e}")
+    exit()
 
-# # --- Thread-Safe Async Embedding Setup ---
+# --- NEW: Vertex AI Vector Search Configuration ---
+API_ENDPOINT = "1028163771.us-central1-856708660097.vdb.vertexai.goog"
+INDEX_ENDPOINT = "projects/856708660097/locations/us-central1/indexEndpoints/6254692840882831360"
+DEPLOYED_INDEX_ID = "my_narrs_emb_index_display_1751478778959"
+
+try:
+    client_options = {"api_endpoint": API_ENDPOINT}
+    vector_search_client = aiplatform_v1.MatchServiceClient(client_options=client_options)
+    print("✅ Vertex AI Vector Search client initialized successfully.")
+except Exception as e:
+    print(f"❌ FATAL ERROR: Could not initialize Vertex AI Vector Search client. Error: {e}")
+    exit()
+
+
+# --- Thread-Safe Async Embedding Setup (Unchanged) ---
 embedding_queue = queue.Queue()
 
 def embedding_worker():
@@ -71,35 +88,27 @@ try:
         G = pickle.load(f)
     print("✅ Successfully loaded the graph data.")
 except FileNotFoundError:
-    print("❌ ERROR: 'saved_components_tree_processed_full.pkl' not found. Creating dummy graph.")
+    print("❌ ERROR: 'saved_components_tree_processed_full_emb.pkl' not found. Creating dummy graph.")
     G = nx.DiGraph()
     G.add_node("outter")
-    G.add_node("branch_A", text="Sample Branch A", uploaded_at_avg="2023-01-01", embeddings=np.random.rand(768))
-    G.add_node("leaf_1", text="Sample Leaf 1", uploaded_at_avg="2023-01-01", embeddings=np.random.rand(768))
+    G.add_node("branch_A", text="Sample Branch A", uploaded_at_avg="2023-01-01")
+    G.add_node("leaf_1", text="Sample Leaf 1", uploaded_at_avg="2023-01-01")
     G.add_edge("outter", "branch_A")
     G.add_edge("branch_A", "leaf_1")
 
-all_node_ids = list(G.nodes())
-valid_nodes_for_search = [
-    nid for nid in all_node_ids
-    if 'embeddings' in G.nodes[nid] and isinstance(G.nodes[nid]['embeddings'], np.ndarray) and G.nodes[nid]['embeddings'].size > 0
-]
-
-if valid_nodes_for_search:
-    all_embeddings = np.array([G.nodes[nid]['embeddings'] for nid in valid_nodes_for_search])
-    all_embeddings_norm = all_embeddings / np.linalg.norm(all_embeddings, axis=1, keepdims=True)
-    print(f"✅ Pre-processed and normalized {len(valid_nodes_for_search)} node embeddings.")
-else:
-    all_embeddings_norm = np.array([])
-    print("⚠️ No nodes with valid embeddings found.")
-
+print(f"✅ Graph loaded with {len(G.nodes())} nodes.")
 
 def get_node_display_text(graph, node_id):
+    if not graph.has_node(node_id):
+        print(f"Warning: Attempted to get display text for non-existent node '{node_id}'")
+        return f"Unknown Node: {node_id}"
+
     node_data = graph.nodes[node_id]
     if graph.out_degree(node_id) > 0 and 'text' in node_data:
         base_text = node_data['text']
     else:
         base_text = node_id
+        
     if 'uploaded_at_avg' in node_data and node_data['uploaded_at_avg']:
         date_str = str(node_data['uploaded_at_avg']).split(' ')[0]
         return f"{base_text} ({date_str})"
@@ -112,12 +121,9 @@ def index():
     return render_template('index.html')
 
 def create_node_dict(graph, node_id):
-    """
-    Helper function to create a node dictionary for our custom tree.
-    """
     is_branch = graph.out_degree(node_id) > 0
     node_data = graph.nodes[node_id]
-    payload_data = {k: str(v) for k, v in node_data.items() if k != 'embeddings' and v is not None}
+    payload_data = {k: str(v) if v is not None else '' for k, v in node_data.items() if k != 'embeddings'}
 
     return {
         'id': node_id,
@@ -128,7 +134,6 @@ def create_node_dict(graph, node_id):
 
 @app.route('/api/nodes/')
 def get_root_nodes():
-    """API for custom tree root nodes."""
     children_data = []
     if G.has_node('outter'):
         for child_id in G.successors('outter'):
@@ -137,7 +142,6 @@ def get_root_nodes():
 
 @app.route('/api/nodes/<path:node_id>')
 def get_children(node_id):
-    """API for custom tree child nodes."""
     children_data = []
     if G.has_node(node_id):
         sorted_children = sorted(list(G.successors(node_id)), key=lambda id: get_node_display_text(G, id))
@@ -155,26 +159,73 @@ def get_path_to_node(node_id):
     except nx.NetworkXNoPath:
         return jsonify({'error': f'No path found from outter to {node_id}'}), 404
 
+# =====================================================================
+# === CORRECTED SEARCH ENDPOINT =======================================
+# =====================================================================
 @app.route('/api/search', methods=['POST'])
 def search_nodes():
     data = request.get_json()
     query = data.get('query')
-    if not query: return jsonify({'error': 'Query is empty'}), 400
-    if all_embeddings_norm.size == 0: return jsonify({'error': 'No searchable embeddings loaded.'}), 500
+    if not query:
+        return jsonify({'error': 'Query is empty'}), 400
 
+    # Step 1: Get embedding for the query using the background worker
     try:
         future = Future()
         embedding_queue.put((future, [query]))
-        query_embedding = future.result(timeout=30)
+        query_embedding_vector = future.result(timeout=30)[0]
     except Exception as e:
         print(f"❌ Error getting embedding from worker thread: {e}")
         return jsonify({'error': f'Failed to embed query: {e}'}), 500
 
-    query_embedding_norm = query_embedding / np.linalg.norm(query_embedding)
-    similarities = np.dot(all_embeddings_norm, query_embedding_norm.T).flatten()
-    top_indices = np.argsort(similarities)[-20:][::-1]
-    results = [{'id': valid_nodes_for_search[idx], 'text': get_node_display_text(G, valid_nodes_for_search[idx]), 'score': round(float(similarities[idx]), 4)} for idx in top_indices]
-    return jsonify(results)
+    # Step 2: Use Vertex AI Vector Search to find nearest neighbors
+    try:
+        datapoint = aiplatform_v1.IndexDatapoint(
+            feature_vector=query_embedding_vector.tolist()
+        )
+        query_obj = aiplatform_v1.FindNeighborsRequest.Query(
+            datapoint=datapoint,
+            neighbor_count=20 # Fetch top 20 results
+        )
+        search_request = aiplatform_v1.FindNeighborsRequest(
+            index_endpoint=INDEX_ENDPOINT,
+            deployed_index_id=DEPLOYED_INDEX_ID,
+            queries=[query_obj],
+            return_full_datapoint=True, # Set to True to get the datapoint object
+        )
+
+        response = vector_search_client.find_neighbors(search_request)
+
+        # Step 3: Process the response and format for the frontend
+        results = []
+        if response.nearest_neighbors and response.nearest_neighbors[0].neighbors:
+            for neighbor in response.nearest_neighbors[0].neighbors:
+                # === THE FIX IS HERE ===
+                # Access the ID via neighbor.datapoint.datapoint_id
+                node_id = neighbor.datapoint.datapoint_id
+
+                if G.has_node(node_id):
+                    results.append({
+                        'id': node_id,
+                        'text': get_node_display_text(G, node_id),
+                        # The score from the API is a distance metric (lower is better).
+                        'score': round(float(neighbor.distance), 4)
+                    })
+                else:
+                    print(f"⚠️ Vector Search returned ID '{node_id}' which is not in the loaded graph. Skipping.")
+        
+        # NOTE: The frontend JS will display distance as 'score'. Lower is more similar.
+        # To make it more intuitive (higher = better), you could sort by distance ascending
+        # or convert distance to similarity (e.g., 1 - distance, if distance is normalized).
+        # For now, we'll keep it as is.
+        return jsonify(results)
+    
+    except Exception as e:
+        print(f"❌ Error during Vertex AI Vector Search call: {e}")
+        return jsonify({'error': f'Vector Search failed: {e}'}), 500
+# =====================================================================
+# === END OF CORRECTION ===============================================
+# =====================================================================
 
 if __name__ == '__main__':
     app.run(debug=True, host='0.0.0.0', port=5000)

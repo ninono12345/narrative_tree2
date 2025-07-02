@@ -1,0 +1,7 @@
+Flask
+numpy
+networkx
+pandas
+google-cloud-aiplatform
+google-cloud-vertexai
+vertexai
