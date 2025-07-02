@@ -139,7 +139,7 @@ app = Flask(__name__)
 
 # IMPORTANT: Ensure you are using a "light" version of your pickle file
 # that does NOT contain the embeddings. This is the other key to low memory usage.
-GRAPH_FILE = "saved_components_tree_processed_light.pkl" # Assumes you created this file
+GRAPH_FILE = "saved_components_tree_processed_full.pkl" # Assumes you created this file
 
 try:
     with open(GRAPH_FILE, "rb") as f:
