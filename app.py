@@ -21,6 +21,27 @@ from google.cloud import aiplatform_v1
 # os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = CREDENTIALS_FILE
 # print(f"Using credentials from: {os.environ.get('GOOGLE_APPLICATION_CREDENTIALS')}")
 
+CREDENTIALS_FILENAME = "commanding-fact-441820-j9-0e1712201ab6.json"
+
+# Render places secret files in /etc/secrets/
+# Construct the full path to the credentials file
+RENDER_CREDENTIALS_PATH = f"/etc/secrets/{CREDENTIALS_FILENAME}"
+
+# Check if the file exists at the expected path
+if os.path.exists(RENDER_CREDENTIALS_PATH):
+    # Set the environment variable that the Google Cloud library expects
+    os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = RENDER_CREDENTIALS_PATH
+    print(f"✅ Credentials found on Render at: {RENDER_CREDENTIALS_PATH}")
+else:
+    # This is a fallback for local development (optional but good practice)
+    # if os.path.exists(CREDENTIALS_FILENAME):
+    #     os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = CREDENTIALS_FILENAME
+    #     print(f"✅ Credentials found locally: {CREDENTIALS_FILENAME}")
+    # else:
+    print(f"❌ FATAL ERROR: Credentials file not found at {RENDER_CREDENTIALS_PATH} or locally.")
+    exit()
+
+
 PROJECT_ID = "commanding-fact-441820-j9"
 MODEL_ID = "text-multilingual-embedding-002"
 
@@ -32,7 +53,7 @@ try:
     print("✅ Vertex AI Embedding Model initialized successfully.")
 except Exception as e:
     print(f"❌ FATAL ERROR: Could not initialize Vertex AI Embedding Model. Error: {e}")
-    exit()
+    # exit()
 
 # --- NEW: Vertex AI Vector Search Configuration ---
 API_ENDPOINT = "1028163771.us-central1-856708660097.vdb.vertexai.goog"
@@ -45,7 +66,7 @@ try:
     print("✅ Vertex AI Vector Search client initialized successfully.")
 except Exception as e:
     print(f"❌ FATAL ERROR: Could not initialize Vertex AI Vector Search client. Error: {e}")
-    exit()
+    # exit()
 
 
 # --- Thread-Safe Async Embedding Setup (Unchanged) ---
