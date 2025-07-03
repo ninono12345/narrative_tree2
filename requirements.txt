@@ -4,3 +4,4 @@ networkx
 pandas
 google-auth
 requests
+httpx
