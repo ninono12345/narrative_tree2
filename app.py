@@ -8,121 +8,142 @@ import json
 import threading
 import queue
 from concurrent.futures import Future
+import time
 
-# --- NEW: Import for Vertex AI Vector Search ---
-# Note: We only import the top-level package here. Specific classes
-# will be imported inside the lazy-loading function to reduce startup overhead.
-from google.cloud import aiplatform_v1
-import vertexai
-from vertexai.language_models import TextEmbeddingInput # Keep this one for the worker
+# --- NEW: Lightweight libraries for HTTP calls and Authentication ---
+import requests
+from google.oauth2 import service_account
+from google.auth.transport.requests import Request
 
-# --- Environment and Vertex AI Initialization ---
-# This section remains unchanged. It correctly sets up credentials.
+# --- Environment and Vertex AI Configuration ---
+# All Google Cloud client libraries are removed to save memory.
+# We only need the configuration values.
+
 CREDENTIALS_FILENAME = "commanding-fact-441820-j9-0e1712201ab6.json"
 RENDER_CREDENTIALS_PATH = f"/etc/secrets/{CREDENTIALS_FILENAME}"
+# RENDER_CREDENTIALS_PATH = CREDENTIALS_FILENAME
+GOOGLE_APPLICATION_CREDENTIALS = ""
 
 if os.path.exists(RENDER_CREDENTIALS_PATH):
-    os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = RENDER_CREDENTIALS_PATH
-    print(f"✅ Credentials found on Render at: {RENDER_CREDENTIALS_PATH}")
+    GOOGLE_APPLICATION_CREDENTIALS = RENDER_CREDENTIALS_PATH
+    print(f"✅ Credentials found on Render at: {GOOGLE_APPLICATION_CREDENTIALS}")
 else:
+    # Fallback for local development
     if os.path.exists(CREDENTIALS_FILENAME):
-        os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = CREDENTIALS_FILENAME
-        print(f"✅ Credentials found locally for development: {CREDENTIALS_FILENAME}")
+        GOOGLE_APPLICATION_CREDENTIALS = CREDENTIALS_FILENAME
+        print(f"✅ Credentials found locally: {GOOGLE_APPLICATION_CREDENTIALS}")
     else:
         print(f"❌ FATAL ERROR: Credentials file not found at {RENDER_CREDENTIALS_PATH} or locally.")
         exit()
 
-# --- Configuration Constants ---
-# Moved all client configuration here, but NOT the client objects themselves.
 PROJECT_ID = "commanding-fact-441820-j9"
+LOCATION = "us-central1" # Important for constructing REST URLs
 MODEL_ID = "text-multilingual-embedding-002"
+
+# Vector Search Configuration
 API_ENDPOINT = "1028163771.us-central1-856708660097.vdb.vertexai.goog"
-INDEX_ENDPOINT = "projects/856708660097/locations/us-central1/indexEndpoints/6254692840882831360"
+INDEX_ENDPOINT_PATH = "projects/856708660097/locations/us-central1/indexEndpoints/6254692840882831360"
 DEPLOYED_INDEX_ID = "my_narrs_emb_index_display_1751478778959"
 
 
-# =====================================================================
-# === LAZY INITIALIZATION FOR GOOGLE CLOUD CLIENTS ====================
-# =====================================================================
-# These global variables will hold the client objects once they are created.
-# They start as None.
-_model_vertex = None
-_vector_search_client = None
-# A lock to prevent race conditions if two requests try to initialize at the same time.
-_init_lock = threading.Lock()
+# --- NEW: Lightweight Authentication Handler ---
+_cached_token = None
+_token_expiry = 0
+_token_lock = threading.Lock()
 
-def get_vertex_clients():
+def get_gcloud_token():
     """
-    Initializes and returns the Vertex AI clients using a thread-safe,
-    lazy-loading pattern. This prevents high memory usage on app startup.
+    Gets a Google Cloud access token, caching it until it expires.
+    This is thread-safe and highly efficient.
     """
-    global _model_vertex, _vector_search_client
+    global _cached_token, _token_expiry
+    with _token_lock:
+        # If token is valid for at least 1 more minute, return it
+        if _cached_token and _token_expiry > time.time() + 60:
+            return _cached_token
 
-    # "Double-Checked Locking" pattern. First check is fast and avoids locking.
-    if _model_vertex and _vector_search_client:
-        return _model_vertex, _vector_search_client
-
-    # If clients are not initialized, acquire a lock to ensure only one
-    # thread initializes them.
-    with _init_lock:
-        # Check again inside the lock in case another thread finished initialization
-        # while this thread was waiting.
-        if _model_vertex and _vector_search_client:
-            return _model_vertex, _vector_search_client
-
-        print("🚀 First-time initialization of Vertex AI clients (this happens only once)...")
+        print("🚀 GCloud token expired or not found. Refreshing...")
         try:
-            # Import the specific model class here
-            from vertexai.language_models import TextEmbeddingModel
-
-            # Initialize Embedding Model
-            vertexai.init(project=PROJECT_ID)
-            _model_vertex = TextEmbeddingModel.from_pretrained(MODEL_ID)
-            print("✅ Vertex AI Embedding Model initialized successfully.")
-
-            # Initialize Vector Search Client
-            client_options = {"api_endpoint": API_ENDPOINT}
-            _vector_search_client = aiplatform_v1.MatchServiceClient(client_options=client_options)
-            print("✅ Vertex AI Vector Search client initialized successfully.")
-
-            return _model_vertex, _vector_search_client
-
+            scopes = ["https://www.googleapis.com/auth/cloud-platform"]
+            creds = service_account.Credentials.from_service_account_file(
+                GOOGLE_APPLICATION_CREDENTIALS, scopes=scopes
+            )
+            creds.refresh(Request())
+            _cached_token = creds.token
+            _token_expiry = creds.expiry.timestamp()
+            print("✅ New GCloud token acquired.")
+            return _cached_token
         except Exception as e:
-            print(f"❌ FATAL ERROR during lazy initialization of Vertex AI clients: {e}")
-            # Re-raise the exception so the request that triggered this fails cleanly.
+            print(f"❌ FATAL ERROR: Could not get Google Cloud auth token: {e}")
             raise
-# =====================================================================
-# === END OF LAZY INITIALIZATION SETUP ================================
-# =====================================================================
 
 
-# --- Thread-Safe Async Embedding Setup ---
+# --- NEW: Async HTTP-based Embedding Function ---
+async def embed_text_http(texts: list, task: str = "RETRIEVAL_QUERY"):
+    """
+    Gets text embeddings by calling the Vertex AI REST API directly.
+    """
+    try:
+        token = get_gcloud_token()
+        headers = {
+            "Authorization": f"Bearer {token}",
+            "Content-Type": "application/json; charset=utf-8",
+        }
+        # Note: The embedding model for search/retrieval is different than for clustering
+        # We will use RETRIEVAL_QUERY for search, and RETRIEVAL_DOCUMENT for indexing
+        # but for this app's purpose, query is fine.
+        payload = {
+            "instances": [{"task_type": task, "content": text} for text in texts]
+        }
+        url = f"https://{LOCATION}-aiplatform.googleapis.com/v1/projects/{PROJECT_ID}/locations/{LOCATION}/publishers/google/models/{MODEL_ID}:predict"
+
+        # Use a session for potential connection pooling
+        async with requests.AsyncSession() as session:
+            response = await session.post(url, headers=headers, json=payload, timeout=30)
+            response.raise_for_status() # Raise an exception for bad status codes (4xx or 5xx)
+            
+            json_response = response.json()
+            embeddings = [np.array(p['embeddings']['values']) for p in json_response['predictions']]
+            return embeddings
+
+    except Exception as e:
+        print(f"❌ Error during HTTP embedding call: {e}")
+        # In a real app, you might want to check response.text for more detailed error messages from the API
+        raise
+
+# --- Thread-Safe Async Embedding Setup (Modified to use HTTP) ---
 embedding_queue = queue.Queue()
 
 def embedding_worker():
+    # We need to import requests here for the async version to work in a new thread
+    import httpx
+    
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
 
-    # Get the model client for this thread. This will trigger the first-time
-    # initialization if the app has just started.
-    print("Embedding worker thread is acquiring Vertex AI client...")
-    model_vertex, _ = get_vertex_clients()
-    print("Embedding worker thread has client.")
-
     async def aembed_text(texts: list, task: str = "RETRIEVAL_QUERY"):
         try:
-            inputs = [TextEmbeddingInput(text, task) for text in texts]
-            embeddings = await model_vertex.get_embeddings_async(inputs)
-            return np.array([embedding.values for embedding in embeddings])
+            token = get_gcloud_token()
+            headers = { "Authorization": f"Bearer {token}", "Content-Type": "application/json; charset=utf-8" }
+            payload = { "instances": [{"task_type": task, "content": text} for text in texts] }
+            url = f"https://{LOCATION}-aiplatform.googleapis.com/v1/projects/{PROJECT_ID}/locations/{LOCATION}/publishers/google/models/{MODEL_ID}:predict"
+            
+            async with httpx.AsyncClient() as client:
+                response = await client.post(url, headers=headers, json=payload, timeout=30)
+                response.raise_for_status()
+                json_response = response.json()
+                embeddings = [p['embeddings']['values'] for p in json_response['predictions']]
+                return np.array(embeddings)
         except Exception as e:
-            print(f"Error during async embedding call: {e}")
+            print(f"Error during async HTTP embedding call: {e}")
             raise
 
     async def main_loop():
         while True:
             future, texts = embedding_queue.get()
-            print(f"Worker received job to embed {len(texts)} text(s).")
+            print(f"Worker received job to embed {len(texts)} text(s) via HTTP.")
             try:
+                # Use the new HTTP-based async function
                 result = await aembed_text(texts)
                 future.set_result(result)
             except Exception as e:
@@ -132,46 +153,36 @@ def embedding_worker():
 
 worker_thread = threading.Thread(target=embedding_worker, daemon=True)
 worker_thread.start()
-print("✅ Embedding worker thread started.")
+print("✅ Embedding worker thread started (using lightweight HTTP).")
 
-# --- App Initialization and Data Loading ---
+
+# --- App Initialization and Data Loading (Using lightweight graph) ---
 app = Flask(__name__)
 
-# IMPORTANT: Ensure you are using a "light" version of your pickle file
-# that does NOT contain the embeddings. This is the other key to low memory usage.
-GRAPH_FILE = "saved_components_tree_processed_full.pkl" # Assumes you created this file
-
+LIGHTWEIGHT_GRAPH_FILE = "saved_components_tree_processed_full.pkl"
 try:
-    with open(GRAPH_FILE, "rb") as f:
+    with open(LIGHTWEIGHT_GRAPH_FILE, "rb") as f:
         G = pickle.load(f)
-    print(f"✅ Successfully loaded lightweight graph data from '{GRAPH_FILE}'.")
+    print(f"✅ Successfully loaded lightweight graph data from '{LIGHTWEIGHT_GRAPH_FILE}'.")
 except FileNotFoundError:
-    print(f"❌ ERROR: '{GRAPH_FILE}' not found. Creating dummy graph.")
+    print(f"❌ ERROR: '{LIGHTWEIGHT_GRAPH_FILE}' not found. Please run the pruning script first.")
+    # Create a dummy graph to allow the app to run
     G = nx.DiGraph()
     G.add_node("outter")
-    G.add_node("branch_A", text="Sample Branch A", uploaded_at_avg="2023-01-01")
-    G.add_node("leaf_1", text="Sample Leaf 1", uploaded_at_avg="2023-01-01")
-    G.add_edge("outter", "branch_A")
-    G.add_edge("branch_A", "leaf_1")
 
 print(f"✅ Graph loaded with {len(G.nodes())} nodes.")
 
 def get_node_display_text(graph, node_id):
     if not graph.has_node(node_id):
         return f"Unknown Node: {node_id}"
-
     node_data = graph.nodes[node_id]
-    if graph.out_degree(node_id) > 0 and 'text' in node_data:
-        base_text = node_data['text']
-    else:
-        base_text = node_id
-        
+    base_text = node_data.get('text', node_id)
     if 'uploaded_at_avg' in node_data and node_data['uploaded_at_avg']:
         date_str = str(node_data['uploaded_at_avg']).split(' ')[0]
         return f"{base_text} ({date_str})"
     return base_text
 
-# --- API Endpoints ---
+# --- API Endpoints (Largely Unchanged) ---
 
 @app.route('/')
 def index():
@@ -180,8 +191,7 @@ def index():
 def create_node_dict(graph, node_id):
     is_branch = graph.out_degree(node_id) > 0
     node_data = graph.nodes[node_id]
-    # 'embeddings' key should not exist in the light graph, but this is safe
-    payload_data = {k: str(v) if v is not None else '' for k, v in node_data.items() if k != 'embeddings'}
+    payload_data = {k: str(v) if v is not None else '' for k, v in node_data.items()}
 
     return {
         'id': node_id,
@@ -192,20 +202,16 @@ def create_node_dict(graph, node_id):
 
 @app.route('/api/nodes/')
 def get_root_nodes():
-    children_data = []
-    if G.has_node('outter'):
-        for child_id in G.successors('outter'):
-            children_data.append(create_node_dict(G, child_id))
+    children_data = [create_node_dict(G, child_id) for child_id in G.successors('outter')]
     return jsonify(children_data)
 
 @app.route('/api/nodes/<path:node_id>')
 def get_children(node_id):
-    children_data = []
     if G.has_node(node_id):
         sorted_children = sorted(list(G.successors(node_id)), key=lambda id: get_node_display_text(G, id))
-        for child_id in sorted_children:
-            children_data.append(create_node_dict(G, child_id))
-    return jsonify(children_data)
+        children_data = [create_node_dict(G, child_id) for child_id in sorted_children]
+        return jsonify(children_data)
+    return jsonify([])
 
 @app.route('/api/path_to_node/<path:node_id>')
 def get_path_to_node(node_id):
@@ -217,6 +223,9 @@ def get_path_to_node(node_id):
     except nx.NetworkXNoPath:
         return jsonify({'error': f'No path found from outter to {node_id}'}), 404
 
+# =====================================================================
+# === SEARCH ENDPOINT (REWRITTEN TO USE HTTP) =========================
+# =====================================================================
 @app.route('/api/search', methods=['POST'])
 def search_nodes():
     data = request.get_json()
@@ -225,41 +234,47 @@ def search_nodes():
         return jsonify({'error': 'Query is empty'}), 400
 
     try:
-        # Get the clients. This will be instant after the first call.
-        _, vector_search_client = get_vertex_clients()
-
-        # Step 1: Get embedding for the query using the background worker
+        # Step 1: Get embedding for the query using the background worker (which now uses HTTP)
         future = Future()
         embedding_queue.put((future, [query]))
         query_embedding_vector = future.result(timeout=30)[0]
 
-        # Step 2: Use Vertex AI Vector Search
-        datapoint = aiplatform_v1.IndexDatapoint(
-            feature_vector=query_embedding_vector.tolist()
-        )
-        query_obj = aiplatform_v1.FindNeighborsRequest.Query(
-            datapoint=datapoint,
-            neighbor_count=20
-        )
-        search_request = aiplatform_v1.FindNeighborsRequest(
-            index_endpoint=INDEX_ENDPOINT,
-            deployed_index_id=DEPLOYED_INDEX_ID,
-            queries=[query_obj],
-            return_full_datapoint=True,
-        )
-
-        response = vector_search_client.find_neighbors(search_request)
-
-        # Step 3: Process the response
+        # Step 2: Use Vector Search by calling its REST API directly
+        token = get_gcloud_token()
+        headers = {
+            "Authorization": f"Bearer {token}",
+            "Content-Type": "application/json; charset=utf-8",
+        }
+        
+        # Construct the payload for the findNeighbors REST endpoint
+        payload = {
+            "deployed_index_id": DEPLOYED_INDEX_ID,
+            "queries": [
+                {
+                    "neighbor_count": 20,
+                    "datapoint": {
+                        "feature_vector": query_embedding_vector.tolist()
+                    }
+                }
+            ]
+        }
+        
+        url = f"https://{API_ENDPOINT}/v1/{INDEX_ENDPOINT_PATH}:findNeighbors"
+        
+        response = requests.post(url, headers=headers, json=payload, timeout=30)
+        response.raise_for_status()
+        
+        # Step 3: Process the response and format for the frontend
         results = []
-        if response.nearest_neighbors and response.nearest_neighbors[0].neighbors:
-            for neighbor in response.nearest_neighbors[0].neighbors:
-                node_id = neighbor.datapoint.datapoint_id
+        json_response = response.json()
+        if json_response and 'nearestNeighbors' in json_response and json_response['nearestNeighbors']:
+            for neighbor in json_response['nearestNeighbors'][0]['neighbors']:
+                node_id = neighbor['datapoint']['datapointId']
                 if G.has_node(node_id):
                     results.append({
                         'id': node_id,
                         'text': get_node_display_text(G, node_id),
-                        'score': round(float(neighbor.distance), 4)
+                        'score': round(float(neighbor['distance']), 4)
                     })
                 else:
                     print(f"⚠️ Vector Search returned ID '{node_id}' which is not in the loaded graph. Skipping.")
@@ -267,11 +282,14 @@ def search_nodes():
         return jsonify(results)
     
     except Exception as e:
-        # This single block now catches errors from client initialization,
-        # embedding, or the vector search call.
-        print(f"❌ Error during search process: {e}")
-        return jsonify({'error': f'An internal error occurred during the search: {e}'}), 500
+        print(f"❌ Error during HTTP Vector Search call or processing: {e}")
+        return jsonify({'error': f'Vector Search failed: {e}'}), 500
+# =====================================================================
+# === END OF CORRECTION ===============================================
+# =====================================================================
 
 if __name__ == '__main__':
-    # For local development, Render will use its own Gunicorn command
-    app.run(debug=True, host='0.0.0.0', port=5000)
+    # When running locally with `python app.py`, debug should be True
+    # For production on Render, Gunicorn sets this, and debug should be False
+    is_debug = os.environ.get("FLASK_ENV") == "development"
+    app.run(debug=is_debug, host='0.0.0.0', port=int(os.environ.get("PORT", 5000)))
